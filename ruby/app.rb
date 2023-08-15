@@ -100,33 +100,54 @@ module Isuconp
 
       def make_posts(results, all_comments: false)
         posts = []
-        results.to_a.each do |post|
-          post[:comment_count] = db.prepare('SELECT COUNT(*) AS `count` FROM `comments` WHERE `post_id` = ?').execute(
-            post[:id]
-          ).first[:count]
+        processed_users = {} # Store processed users to avoid redundant queries
 
-          query = 'SELECT * FROM `comments` WHERE `post_id` = ? ORDER BY `created_at` DESC'
-          unless all_comments
-            query += ' LIMIT 3'
+        results.each do |row|
+          post = {
+            id: row['id'],
+            user_id: row['user_id'],
+            body: row['body'],
+            created_at: row['created_at'],
+            mime: row['mime'],
+            comment_count: 0,
+            comments: [],
+            user: nil
+          }
+
+          unless processed_users.key?(post[:user_id])
+            user_query = "SELECT * FROM `users` WHERE `id` = #{post[:user_id]}"
+            user_result = db.query(user_query).first
+            processed_users[post[:user_id]] = user_result
           end
-          comments = db.prepare(query).execute(
-            post[:id]
-          ).to_a
-          comments.each do |comment|
-            comment[:user] = db.prepare('SELECT * FROM `users` WHERE `id` = ?').execute(
-              comment[:user_id]
-            ).first
+
+          user = processed_users[post[:user_id]]
+          if user && user['del_flg'] == 0
+            post[:user] = user
+            comment_count_query = "SELECT COUNT(*) AS `count` FROM `comments` WHERE `post_id` = #{post[:id]}"
+            comment_count_result = db.query(comment_count_query).first
+            post[:comment_count] = comment_count_result['count']
+
+            all_comments = true
+            comments_query = "SELECT * FROM `comments` WHERE `post_id` = #{post[:id]} ORDER BY `created_at` DESC"
+            comments_query += ' LIMIT 3' unless all_comments
+            comments_results = db.query(comments_query)
+            comments_results.each do |comment_row|
+              comment_user_query = "SELECT * FROM `users` WHERE `id` = #{comment_row['user_id']}"
+              comment_user = db.query(comment_user_query).first
+
+              post[:comments] << {
+                id: comment_row['id'],
+                comment: comment_row['comment'],
+                created_at: comment_row['created_at'],
+                user: comment_user
+              }
+            end
+            post[:comments].reverse!
+
+            posts << post
+            break if posts.length >= POSTS_PER_PAGE
           end
-          post[:comments] = comments.reverse
-
-          post[:user] = db.prepare('SELECT * FROM `users` WHERE `id` = ?').execute(
-            post[:user_id]
-          ).first
-
-          posts.push(post) if post[:user][:del_flg] == 0
-          break if posts.length >= POSTS_PER_PAGE
         end
-
         posts
       end
 
@@ -224,7 +245,10 @@ module Isuconp
     get '/' do
       me = get_session_user()
 
-      results = db.query('SELECT `id`, `user_id`, `body`, `created_at`, `mime` FROM `posts` ORDER BY `created_at` DESC')
+      results = db.query('SELECT p.`id`, p.`user_id`, p.`body`, p.`created_at`, p.`mime`, c.`comment`
+                    FROM `posts` p
+                    LEFT JOIN `comments` c ON p.`id` = c.`post_id`
+                    ORDER BY p.`created_at` DESC')
       posts = make_posts(results)
 
       erb :index, layout: :layout, locals: { posts: posts, me: me }
